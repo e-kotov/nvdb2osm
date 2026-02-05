@@ -572,7 +572,7 @@ def osm_tags (segment):
 		tags['ref'] = "E " + str(prop['Vägnummer/Huvudnummer'])
 	elif prop['Vägkategori/Kategori'] in [2, 3]:  # Trunk and primary
 		tags['ref'] = str(prop['Vägnummer/Huvudnummer'])
-	elif prop['Vägkategori/Kategori'] == 4:  # Secondary
+	elif prop['Vägkategori/Kategori'] == 4 and prop['KOMMUNNR']:  # Secondary
 		tags['ref'] = county_refs[ prop['KOMMUNNR'] // 100 ] + " " + str(prop['Vägnummer/Huvudnummer'])  # Include county letter
 
 	# Backward/forward tags
@@ -739,7 +739,7 @@ def tag_network():
 	for segment in segments['features']:
 		prop = segment['properties']
 
-		if "Bro och tunnel/Identitet" in prop:  # Unique id of structure
+		if "Bro och tunnel/Identitet" in prop and "Bro och tunnel/Konstruktion" in prop:  # Unique id of structure
 			bridge_id = prop['Bro och tunnel/Identitet']
 
 			if bridge_id not in bridges:
