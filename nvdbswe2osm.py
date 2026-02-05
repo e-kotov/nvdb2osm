@@ -444,7 +444,7 @@ def osm_tags (segment):
 			tags['highway'] = "cycleway"
 
 		# Swap cycleway to footway if footway network
-		if prop['Vägtrafiknät/Nättyp'] == 4 and 1and "highway" in tags and tags['highway'] == "cycleway":
+		if prop['Vägtrafiknät/Nättyp'] == 4 and "highway" in tags and tags['highway'] == "cycleway":
 			tags['highway'] = "footway"
 			if "cycleway" in tags:
 				tags['footway'] = tags['cycleway']
@@ -504,8 +504,9 @@ def osm_tags (segment):
 		elif prop['Väghållare/Väghållartyp'] == 3:  # Private road owner
 
 #			if prop['Funktionell vägklass/Klass'] and prop['Funktionell vägklass/Klass'] < 9 or prop['Driftbidrag statligt/Vägnr']:
-			if prop['Funktionell vägklass/Klass'] and prop['Funktionell vägklass/Klass'] < 8 or prop['Driftbidrag statligt/Vägnr']:
-					or prop['Funktionell vägklass/Klass'] == 8 and not prop['Tillgänglighet/Tillgänglighetsklass']: # not in [3,4]:
+			if (prop['Funktionell vägklass/Klass'] and prop['Funktionell vägklass/Klass'] < 8
+					or prop['Driftbidrag statligt/Vägnr']
+					or prop['Funktionell vägklass/Klass'] == 8 and not prop['Tillgänglighet/Tillgänglighetsklass']): # not in [3,4]:
 
 				if prop['Tättbebyggt område']:
 					tags['highway'] = "residential"  # Residential for urban areas
