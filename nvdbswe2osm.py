@@ -1814,21 +1814,20 @@ def tag_property(osm_element: ET.Element, tag_key: str, tag_value: str) -> None:
 def output_network(filename: str, output_filename: Optional[str] = None) -> None:
     message("Saving file... ")
 
-    osm_id = -1000
+    node_id = 1
+    way_id = 1
     count = 0
 
     osm_root = ET.Element(
         "osm", version="0.6", generator="nvdb2osm_sweden", upload="false"
     )
 
-    # First ouput all start/end nodes, which may be used by several ways.
-    # The node id is saved for later reference by ways.
+    # Pass 1: Junction nodes
 
     for node_coordinate, node in iter(junctions.items()):
-        osm_id -= 1
         osm_node = ET.Element(
             "node",
-            id=str(osm_id),
+            id=str(node_id),
             action="modify",
             lat=str(node_coordinate[1]),
             lon=str(node_coordinate[0]),
@@ -1848,53 +1847,33 @@ def output_network(filename: str, output_filename: Optional[str] = None) -> None
                     str(value),
                 )
 
-        node["osmid"] = osm_id
+        node["osmid"] = node_id
+        node_id += 1
 
-    # Then output all connected ways
+    # Pass 2: Internal nodes
 
-    # Then output all connected ways
-
-    # Two-pass output:
-    # 1. Output all internal nodes for all ways (to satisfy OSM standards requiring Nodes < Ways)
-    # 2. Output all ways
-    
-
-    # Reset osm_id for Ways (need to track back or manage IDs carefully)
-    # Actually, distinct IDs for nodes and ways are fine, but we need to know the IDs for references.
-    # The current logic uses a monotonically decreasing osm_id for BOTH nodes and ways.
-    # If we split the loop, we need to replicate the ID generation sequence or pre-calculate IDs.
-    
-    # Better approach: Pre-calculate IDs or store them.
-    # Let's start osm_id from where we left off after junction nodes.
-    
-    current_osm_id = osm_id 
-    
-    # Assign IDs to all internal nodes first
     for way_segments in ways:
         for segment in way_segments:
             segment["internal_node_ids"] = []
             line_geometry = segment["geometry"]["coordinates"][0][1:-1]
             for node in line_geometry:
-                current_osm_id -= 1
-                segment["internal_node_ids"].append(current_osm_id)
-                
                 osm_node = ET.Element(
                     "node",
-                    id=str(current_osm_id),
+                    id=str(node_id),
                     action="modify",
                     lat=str(node[1]),
                     lon=str(node[0]),
                 )
                 osm_root.append(osm_node)
+                segment["internal_node_ids"].append(node_id)
+                node_id += 1
 
-    # Pass 2: Ways
+    # Pass 3: Ways
+
     for way_segments in ways:
         segment = way_segments[0]
-        current_osm_id -= 1 # ID for the Way itself
-        osm_way_id = current_osm_id
-        
         count += 1
-        osm_way = ET.Element("way", id=str(osm_way_id), action="modify")
+        osm_way = ET.Element("way", id=str(way_id), action="modify")
         osm_root.append(osm_way)
 
         # All tags are identical for the connected segments
@@ -1920,16 +1899,16 @@ def output_network(filename: str, output_filename: Optional[str] = None) -> None
         # Loop all segments in connected way
 
         for segment in way_segments:
-            segment["osmid"] = osm_way_id
-            
-            # Use pre-calculated internal node IDs
-            if "internal_node_ids" in segment:
-                for node_id in segment["internal_node_ids"]:
-                     osm_way.append(ET.Element("nd", ref=str(node_id)))
+            segment["osmid"] = way_id
+
+            for nid in segment["internal_node_ids"]:
+                osm_way.append(ET.Element("nd", ref=str(nid)))
 
             osm_way.append(
                 ET.Element("nd", ref=str(junctions[segment["end_node"]]["osmid"]))
             )
+
+        way_id += 1
 
     # Produce OSM/XML file
 
@@ -1995,19 +1974,33 @@ def output_pbf(filename: str, output_filename: Optional[str] = None) -> None:
         os.remove(filename)
 
     writer = osmium.SimpleWriter(filename)
-    osm_id = -1000
+    node_id = 1
+    way_id = 1
     count = 0
 
-    # 1. Write junction nodes
+    # Pass 1: Write all junction nodes
 
     for coord, junc in iter(junctions.items()):
         writer.add_node(
-            osmium.osm.mutable.Node(id=osm_id, location=coord, tags=junc["tags"])
+            osmium.osm.mutable.Node(id=node_id, location=coord, tags=junc["tags"])
         )
-        junc["osmid"] = osm_id
-        osm_id -= 1
+        junc["osmid"] = node_id
+        node_id += 1
 
-    # 2. Write ways and their internal nodes
+    # Pass 2: Write all internal nodes (must come before ways for osmium merge)
+
+    for way_segs in ways:
+        for seg in way_segs:
+            seg["internal_node_ids"] = []
+            internal_coords = seg["geometry"]["coordinates"][0][1:-1]
+            for c in internal_coords:
+                writer.add_node(
+                    osmium.osm.mutable.Node(id=node_id, location=(c[0], c[1]))
+                )
+                seg["internal_node_ids"].append(node_id)
+                node_id += 1
+
+    # Pass 3: Write all ways
 
     for way_segs in ways:
         count += 1
@@ -2018,25 +2011,16 @@ def output_pbf(filename: str, output_filename: Optional[str] = None) -> None:
 
         # Loop all segments in connected way
         for seg in way_segs:
-            # Internal nodes
-            internal_coords = seg["geometry"]["coordinates"][0][1:-1]
-            for c in internal_coords:
-                writer.add_node(
-                    osmium.osm.mutable.Node(id=osm_id, location=(c[0], c[1]))
-                )
-                way_node_ids.append(osm_id)
-                osm_id -= 1
-
-            # End junction for this segment
+            for nid in seg["internal_node_ids"]:
+                way_node_ids.append(nid)
             way_node_ids.append(junctions[seg["end_node"]]["osmid"])
 
-        # Add the way
         writer.add_way(
             osmium.osm.mutable.Way(
-                id=osm_id, nodes=way_node_ids, tags=way_segs[0]["tags"]
+                id=way_id, nodes=way_node_ids, tags=way_segs[0]["tags"]
             )
         )
-        osm_id -= 1
+        way_id += 1
 
     writer.close()
     message("\n\tSaved %i elements in file '%s'\n" % (count, filename))
