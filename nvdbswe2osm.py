@@ -14,6 +14,8 @@ import sys
 import copy
 import math
 import time
+import argparse
+import os
 from xml.etree import ElementTree as ET
 from typing import Any, Optional, Union, Dict, List, Tuple, Callable
 
@@ -1785,7 +1787,7 @@ def tag_property(osm_element: ET.Element, tag_key: str, tag_value: str) -> None:
 # Output road network or objects to OSM file
 
 
-def output_network(filename: str) -> None:
+def output_network(filename: str, output_filename: Optional[str] = None) -> None:
     message("Saving file... ")
 
     osm_id = -1000
@@ -1880,21 +1882,29 @@ def output_network(filename: str) -> None:
 
     # Produce OSM/XML file
 
-    # Strip known geospatial extensions for output filename
-    base = filename
-    for ext in [".geojson", ".json", ".gpkg", ".shp"]:
-        if base.lower().endswith(ext):
-            base = base[: -len(ext)]
-            break
+    if output_filename:
+        filename = output_filename
     else:
-        # Handle .gdb directories
-        if base.lower().endswith(".gdb"):
-            base = base[: -len(".gdb")]
+        # Strip known geospatial extensions for output filename
+        base = filename
+        for ext in [".geojson", ".json", ".gpkg", ".shp"]:
+            if base.lower().endswith(ext):
+                base = base[: -len(ext)]
+                break
+        else:
+            # Handle .gdb directories
+            if base.lower().endswith(".gdb"):
+                base = base[: -len(".gdb")]
 
-    if segment_output:
-        filename = base + "_segment.osm"
-    else:
-        filename = base + ".osm"
+        if segment_output:
+            filename = base + "_segment.osm"
+        else:
+            filename = base + ".osm"
+
+    # Ensure parent directory exists
+    parent_dir = os.path.dirname(filename)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
 
     osm_tree = ET.ElementTree(osm_root)
     osm_tree.write(filename, encoding="utf-8", method="xml", xml_declaration=True)
@@ -2127,28 +2137,37 @@ if __name__ == "__main__":
     start_time = time.time()
     message("\nConverting Swedish NVDB to OSM\n\n")
 
-    if len(sys.argv) > 1:
-        filename = sys.argv[1]
-    else:
-        sys.exit("No input filename provided\n")
+    parser = argparse.ArgumentParser(description="Converts NVDB data to OSM.")
+    parser.add_argument("filename", help="Input GeoJSON/FileGDB/GeoPackage file")
+    parser.add_argument(
+        "-o", "--output", help="Output OSM file path (optional)", default=None
+    )
+    parser.add_argument(
+        "-segment",
+        action="store_true",
+        help="Output each highway segments as in input file, without creating longer ways",
+    )
+    parser.add_argument("-debug", action="store_true", help="Add extra tags for debugging/testing")
+    parser.add_argument("--layer", help="Layer name for FileGDB/GeoPackage/Shapefile")
+    parser.add_argument("--source-crs", help="Source CRS (e.g. EPSG:3006)")
 
-    if "-segment" in sys.argv:
+    args = parser.parse_args()
+
+    filename = args.filename
+    output_file = args.output
+
+    if args.segment:
         segment_output = True
         simplify_method = "segment"
 
-    if "-debug" in sys.argv:
+    if args.debug:
         debug = True
         segment_output = True
         simplify_method = "segment"
 
     # Optional arguments
-    layer = None
-    source_crs = None
-    for i, arg in enumerate(sys.argv):
-        if arg == "--layer" and i + 1 < len(sys.argv):
-            layer = sys.argv[i + 1]
-        if arg == "--source-crs" and i + 1 < len(sys.argv):
-            source_crs = sys.argv[i + 1]
+    layer = args.layer
+    source_crs = args.source_crs
 
     segments = []  # To store all highway segments
     nodes = []  # To store all tagged nodes
@@ -2160,7 +2179,7 @@ if __name__ == "__main__":
     load_file(filename, source_crs=source_crs, layer=layer)
     tag_network()
     simplify_network(simplify_method)  # Options: recursive, route or refname
-    output_network(filename)
+    output_network(filename, output_filename=output_file)
 
     message(
         "Time: %i seconds (%i segments per second)\n\n"
