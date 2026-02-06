@@ -16,21 +16,24 @@ Converts NVDB in Sweden to OSM file with tagging.
    Convert the FileGDB to GeoJSON in QGIS or with `ogr2ogr`, reprojecting to
    WGS84 (EPSG:4326). Then run:
 
-   <code>python3 nvdbswe2osm.py \<municipality.geojson\> [-segment]</code>
+   <code>python3 nvdbswe2osm.py \<municipality.geojson\> [-o output.osm] [-segment]</code>
+ 
+    * The script auto-detects WGS84 coordinates — no external packages needed.
+    * If coordinates are not in WGS84 (e.g. EPSG:3006), the script will attempt to reproject using `pyproj`. If `pyproj` is not installed, it exits with a suggested `ogr2ogr` command to reproject the file.
 
-   * The script auto-detects WGS84 coordinates — no external packages needed.
-   * If coordinates are not in WGS84 (e.g. EPSG:3006), the script will attempt to reproject using `pyproj`. If `pyproj` is not installed, it exits with a suggested `ogr2ogr` command to reproject the file.
-
-3. **FileGDB (the original format that you get from the Lastkajen portal with custom export), GeoPackage, or Shapefile** (requires `fiona` and `pyproj`):
-
-   <code>python3 nvdbswe2osm.py \<municipality.gdb\> [-segment]</code>
-
-   * Coordinates are automatically transformed to WGS84 from the source CRS.
-
-   Options for both modes:
-   * The <code>-segment</code> option includes all NVDB attributes and does not combine segments into longer ways.
-   * Use <code>--layer NAME</code> to specify a layer for multi-layer files.
-   * Use <code>--source-crs EPSG:XXXX</code> to override CRS detection.
+ 3. **FileGDB (the original format that you get from the Lastkajen portal with custom export), GeoPackage, or Shapefile** (requires `fiona` and `pyproj`):
+ 
+    <code>python3 nvdbswe2osm.py \<municipality.gdb\> [-o output.osm] [-segment]</code>
+ 
+    * Coordinates are automatically transformed to WGS84 from the source CRS.
+ 
+    Options for both modes:
+    * **`-o`, `--output`**: Specify output filename. Supports `.osm` (XML) and `.pbf` (Protocolbuffer) extensions (default: `output.osm`).
+    * **`--format`**: Force output format (`osm` or `pbf`). Defaults to `osm` unless `.pbf` extension is detected.
+      * *Note: PBF output requires `osmium` (`pip install osmium`).*
+    * The <code>-segment</code> option includes all NVDB attributes and does not combine segments into longer ways.
+    * Use <code>--layer NAME</code> to specify a layer for multi-layer files.
+    * Use <code>--source-crs EPSG:XXXX</code> to override CRS detection.
 
 ### Notes
 

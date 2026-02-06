@@ -19,6 +19,12 @@ import os
 from xml.etree import ElementTree as ET
 from typing import Any, Optional, Union, Dict, List, Tuple, Callable
 
+try:
+    import osmium
+    _has_osmium = True
+except ImportError:
+    _has_osmium = False
+
 
 version = "0.5.0"
 
@@ -1939,6 +1945,85 @@ def output_network(filename: str, output_filename: Optional[str] = None) -> None
     message("\n\tSaved %i elements in file '%s'\n" % (count, filename))
 
 
+# Output road network to OSM PBF file using pyosmium
+
+
+def output_pbf(filename: str, output_filename: Optional[str] = None) -> None:
+    message("Saving PBF file... ")
+
+    if output_filename:
+        filename = output_filename
+    else:
+        base = filename
+        for ext in [".geojson", ".json", ".gpkg", ".shp"]:
+            if base.lower().endswith(ext):
+                base = base[: -len(ext)]
+                break
+        else:
+            if base.lower().endswith(".gdb"):
+                base = base[: -len(".gdb")]
+
+        if segment_output:
+            filename = base + "_segment.osm.pbf"
+        else:
+            filename = base + ".osm.pbf"
+
+    # Ensure parent directory exists
+    parent_dir = os.path.dirname(filename)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    if os.path.exists(filename):
+        os.remove(filename)
+
+    writer = osmium.SimpleWriter(filename)
+    osm_id = -1000
+    count = 0
+
+    # 1. Write junction nodes
+
+    for coord, junc in iter(junctions.items()):
+        writer.add_node(
+            osmium.osm.mutable.Node(id=osm_id, location=coord, tags=junc["tags"])
+        )
+        junc["osmid"] = osm_id
+        osm_id -= 1
+
+    # 2. Write ways and their internal nodes
+
+    for way_segs in ways:
+        count += 1
+        way_node_ids = []
+
+        # Start junction
+        way_node_ids.append(junctions[way_segs[0]["start_node"]]["osmid"])
+
+        # Loop all segments in connected way
+        for seg in way_segs:
+            # Internal nodes
+            internal_coords = seg["geometry"]["coordinates"][0][1:-1]
+            for c in internal_coords:
+                writer.add_node(
+                    osmium.osm.mutable.Node(id=osm_id, location=(c[0], c[1]))
+                )
+                way_node_ids.append(osm_id)
+                osm_id -= 1
+
+            # End junction for this segment
+            way_node_ids.append(junctions[seg["end_node"]]["osmid"])
+
+        # Add the way
+        writer.add_way(
+            osmium.osm.mutable.Way(
+                id=osm_id, nodes=way_node_ids, tags=way_segs[0]["tags"]
+            )
+        )
+        osm_id -= 1
+
+    writer.close()
+    message("\n\tSaved %i elements in file '%s'\n" % (count, filename))
+
+
 # Check if coordinates in a GeoJSON FeatureCollection look like WGS84.
 # WGS84: |lon| <= 180, |lat| <= 90. Swedish EPSG:3006 has values > 100,000.
 
@@ -2159,15 +2244,18 @@ def load_file(
 # Main program
 
 if __name__ == "__main__":
-    # Load all ways
-
     start_time = time.time()
-    message("\nConverting Swedish NVDB to OSM\n\n")
 
-    parser = argparse.ArgumentParser(description="Converts NVDB data to OSM.")
+    parser = argparse.ArgumentParser(description="Converts NVDB data to OSM or PBF.")
     parser.add_argument("filename", help="Input GeoJSON/FileGDB/GeoPackage file")
     parser.add_argument(
-        "-o", "--output", help="Output OSM file path (optional)", default=None
+        "-o", "--output", help="Output file path (optional)", default=None
+    )
+    parser.add_argument(
+        "--format",
+        choices=["osm", "pbf"],
+        default=None,
+        help="Output format: 'osm' (XML) or 'pbf'. Auto-detected from output filename if not specified.",
     )
     parser.add_argument(
         "-segment",
@@ -2182,6 +2270,23 @@ if __name__ == "__main__":
 
     filename = args.filename
     output_file = args.output
+
+    # Determine output format
+    output_format = args.format
+    if output_format is None:
+        if output_file and output_file.lower().endswith(".pbf"):
+            output_format = "pbf"
+        else:
+            output_format = "osm"
+
+    if output_format == "pbf" and not _has_osmium:
+        sys.exit(
+            "Error: 'osmium' package is required for PBF output. Install with: pip install osmium"
+        )
+
+    message(
+        "\nConverting Swedish NVDB to %s\n\n" % ("PBF" if output_format == "pbf" else "OSM")
+    )
 
     if args.segment:
         segment_output = True
@@ -2206,7 +2311,11 @@ if __name__ == "__main__":
     load_file(filename, source_crs=source_crs, layer=layer)
     tag_network()
     simplify_network(simplify_method)  # Options: recursive, route or refname
-    output_network(filename, output_filename=output_file)
+
+    if output_format == "pbf":
+        output_pbf(filename, output_filename=output_file)
+    else:
+        output_network(filename, output_filename=output_file)
 
     message(
         "Time: %i seconds (%i segments per second)\n\n"
