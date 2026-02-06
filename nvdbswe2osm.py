@@ -993,18 +993,21 @@ def create_node(way, tags, nvdb_properties):
     node = {
         "type": "feature",
         "properties": {},
-        "tags": copy.deepcopy(tags),
+        "tags": tags.copy(),  # Shallow copy is safe for dict of strings
         "geometry": {
             "type": "Point",
-            "coordinates": copy.deepcopy(
-                way["geometry"]["coordinates"][0][0]
-            ),  # First coordinate of line
+            "coordinates": list(way["geometry"]["coordinates"][0][0]),  # Copy coordinate pair
         },
     }
 
     for prop in nvdb_properties:
         if prop in way["properties"]:
-            node["properties"][prop] = copy.deepcopy(way["properties"][prop])
+            value = way["properties"][prop]
+            # Primitives do not need deepcopy.
+            if isinstance(value, (str, int, float, bool, type(None))):
+                node["properties"][prop] = value
+            else:
+                node["properties"][prop] = copy.deepcopy(value)
 
     nodes.append(node)
 
@@ -1368,20 +1371,19 @@ def simplify_polygon(polygon: List[List[float]], epsilon: float) -> List[List[fl
 
 def connected_track(
     segment: Dict[str, Any],
-    tested_segments: set,
+    tested_segments: set,  # Changed to set of ids
     tested_junctions: set,
-    remaining_segments: List[Dict[str, Any]],
+    remaining_lookup: Dict[int, Dict[str, Any]],  # Changed to id(seg) lookup dict
 ) -> bool:
     # Tested segments are accumulating as we traverse
-    if segment not in tested_segments:
-        tested_segments.append(segment)
+    tested_segments.add(id(segment))
 
     track = True
 
     # Test segments connected to both start and end nodes of segment.
     for node in [segment["start_node"], segment["end_node"]]:
         if node not in tested_junctions:
-            tested_junctions.append(node)
+            tested_junctions.add(node)
 
             # Iterate connected ways at junction. Check segments starting from next junction node.
             for test_segment in junctions[node]["segments"]:
@@ -1391,15 +1393,13 @@ def connected_track(
                     track = False
 
                 # New segment must not already have been used and must be available
-                if (
-                    test_segment not in tested_segments
-                    and test_segment in remaining_segments
-                ):
+                ts_id = id(test_segment)
+                if ts_id not in tested_segments and ts_id in remaining_lookup:
                     if not connected_track(
                         test_segment,
                         tested_segments,
                         tested_junctions,
-                        remaining_segments,
+                        remaining_lookup,
                     ):
                         track = False
 
@@ -1412,33 +1412,39 @@ def connected_track(
 
 
 def tag_isolated_tracks():
-    # Build list of service ways; candidates for track
-    remaining_segments = []
+    # Build lookup of service ways; candidates for track
+    # Use id(seg) as key to avoid O(n) list operations while preserving order in iterative extraction
+    remaining_lookup = {}
     for segment in segments["features"]:
         if "highway" in segment["tags"] and segment["tags"]["highway"] == "service":
-            remaining_segments.append(segment)
+            remaining_lookup[id(segment)] = segment
 
     count = 0
 
-    # Reapeat checking groups of connected service roads until all segments have been tested
-    while remaining_segments:
-        segment = remaining_segments[0]
-        tested_segments = []
-        tested_junctions = []
+    # Repeat checking groups of connected service roads until all segments have been tested
+    while remaining_lookup:
+        # Get the first available segment (deterministic selection)
+        segment_id = next(iter(remaining_lookup))
+        segment = remaining_lookup[segment_id]
+        
+        tested_segments = set()  # Store ids of segments in this connected group
+        tested_junctions = set()
 
         # Check if service roads are isolated
         if connected_track(
-            segment, tested_segments, tested_junctions, remaining_segments
+            segment, tested_segments, tested_junctions, remaining_lookup
         ):
             # Change highway=service to track
-            for segment in tested_segments:
-                if segment["tags"]["highway"] == "service":
-                    segment["tags"]["highway"] = "track"
-                    segment["properties"]["TRACK"] = "yes"
+            for seg_id in tested_segments:
+                seg = remaining_lookup[seg_id]
+                if seg["tags"]["highway"] == "service":
+                    seg["tags"]["highway"] = "track"
+                    seg["properties"]["TRACK"] = "yes"
                     count += 1
 
-        for segment in tested_segments:
-            remaining_segments.remove(segment)
+        # Remove processed segments from candidate pool
+        for seg_id in tested_segments:
+            remaining_lookup.pop(seg_id, None)
 
     message("\r\t%i isolated service roads retagged to track\n" % count)
 
@@ -1612,44 +1618,45 @@ def simplify_network_linear(groups):
         message("\r\t%i " % count)
         count -= 1
 
-        remaining_segments = copy.deepcopy(group_segments)
+        # Use dict instead of deepcopy list to preserve order and allow O(1) removal
+        remaining_segments = {id(seg): seg for seg in group_segments}
 
         # Repeat building sequences of longer ways until all segments have been used
-
         while remaining_segments:
-            segment = remaining_segments[0]
-            way = [remaining_segments[0]]
-            remaining_segments.pop(0)
+            # Get first available segment (deterministic)
+            segment_id = next(iter(remaining_segments))
+            segment = remaining_segments.pop(segment_id)
+            way = [segment]
+            
             first_node = segment["start_node"]
             last_node = segment["end_node"]
 
             # Build way forward
-
             found = True
             while found:
                 found = False
-                for segment in remaining_segments[:]:
-                    if segment["start_node"] == last_node:
-                        angle = compute_junction_angle(way[-1], segment)
+                # Iterating over a list of values is better than dict.values() if we pop
+                for seg in list(remaining_segments.values()):
+                    if seg["start_node"] == last_node:
+                        angle = compute_junction_angle(way[-1], seg)
                         if abs(angle) < angle_margin:
-                            last_node = segment["end_node"]
-                            way.append(segment)
-                            remaining_segments.remove(segment)
+                            last_node = seg["end_node"]
+                            way.append(seg)
+                            remaining_segments.pop(id(seg))
                             found = True
                             break
 
             # Build way backward
-
             found = True
             while found:
                 found = False
-                for segment in remaining_segments[:]:
-                    if segment["end_node"] == first_node:
-                        angle = compute_junction_angle(segment, way[0])
+                for seg in list(remaining_segments.values()):
+                    if seg["end_node"] == first_node:
+                        angle = compute_junction_angle(seg, way[0])
                         if abs(angle) < angle_margin:
-                            first_node = segment["start_node"]
-                            way.insert(0, segment)
-                            remaining_segments.remove(segment)
+                            first_node = seg["start_node"]
+                            way.insert(0, seg)
+                            remaining_segments.pop(id(seg))
                             found = True
                             break
 
