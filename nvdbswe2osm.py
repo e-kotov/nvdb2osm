@@ -1828,12 +1828,49 @@ def output_network(filename: str, output_filename: Optional[str] = None) -> None
 
     # Then output all connected ways
 
+    # Then output all connected ways
+
+    # Two-pass output:
+    # 1. Output all internal nodes for all ways (to satisfy OSM standards requiring Nodes < Ways)
+    # 2. Output all ways
+    
+
+    # Reset osm_id for Ways (need to track back or manage IDs carefully)
+    # Actually, distinct IDs for nodes and ways are fine, but we need to know the IDs for references.
+    # The current logic uses a monotonically decreasing osm_id for BOTH nodes and ways.
+    # If we split the loop, we need to replicate the ID generation sequence or pre-calculate IDs.
+    
+    # Better approach: Pre-calculate IDs or store them.
+    # Let's start osm_id from where we left off after junction nodes.
+    
+    current_osm_id = osm_id 
+    
+    # Assign IDs to all internal nodes first
+    for way_segments in ways:
+        for segment in way_segments:
+            segment["internal_node_ids"] = []
+            line_geometry = segment["geometry"]["coordinates"][0][1:-1]
+            for node in line_geometry:
+                current_osm_id -= 1
+                segment["internal_node_ids"].append(current_osm_id)
+                
+                osm_node = ET.Element(
+                    "node",
+                    id=str(current_osm_id),
+                    action="modify",
+                    lat=str(node[1]),
+                    lon=str(node[0]),
+                )
+                osm_root.append(osm_node)
+
+    # Pass 2: Ways
     for way_segments in ways:
         segment = way_segments[0]
-        osm_id -= 1
-        osm_way_id = osm_id
+        current_osm_id -= 1 # ID for the Way itself
+        osm_way_id = current_osm_id
+        
         count += 1
-        osm_way = ET.Element("way", id=str(osm_id), action="modify")
+        osm_way = ET.Element("way", id=str(osm_way_id), action="modify")
         osm_root.append(osm_way)
 
         # All tags are identical for the connected segments
@@ -1860,21 +1897,11 @@ def output_network(filename: str, output_filename: Optional[str] = None) -> None
 
         for segment in way_segments:
             segment["osmid"] = osm_way_id
-            line_geometry = segment["geometry"]["coordinates"][0][1:-1]
-
-            # Output all nodes in way
-
-            for node in line_geometry:
-                osm_id -= 1
-                osm_node = ET.Element(
-                    "node",
-                    id=str(osm_id),
-                    action="modify",
-                    lat=str(node[1]),
-                    lon=str(node[0]),
-                )
-                osm_root.append(osm_node)
-                osm_way.append(ET.Element("nd", ref=str(osm_id)))
+            
+            # Use pre-calculated internal node IDs
+            if "internal_node_ids" in segment:
+                for node_id in segment["internal_node_ids"]:
+                     osm_way.append(ET.Element("nd", ref=str(node_id)))
 
             osm_way.append(
                 ET.Element("nd", ref=str(junctions[segment["end_node"]]["osmid"]))
