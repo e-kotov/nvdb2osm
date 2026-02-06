@@ -35,6 +35,35 @@ Converts NVDB in Sweden to OSM file with tagging.
     * Use <code>--layer NAME</code> to specify a layer for multi-layer files.
     * Use <code>--source-crs EPSG:XXXX</code> to override CRS detection.
 
+### Processing country-wide data
+
+The full Swedish NVDB dataset (5M+ segments, ~1.7 GB FileGDB) requires too much memory to process at once. Use `--split` to process by county automatically:
+
+```
+python3 nvdbswe2osm.py file.gdb --split county --format pbf
+```
+
+This creates a folder with one output file per county. To merge into a single file:
+
+```
+osmium merge sw_split/county_*.osm.pbf -o sweden.osm.pbf
+```
+
+For finer splits (e.g. if a county is still too large):
+
+```
+python3 nvdbswe2osm.py file.gdb --split municipality --format pbf
+```
+
+To process a single region:
+
+```
+python3 nvdbswe2osm.py file.gdb --county 25              # Norrbotten
+python3 nvdbswe2osm.py file.gdb --municipality 2580       # Umeå
+```
+
+County codes are the first two digits of the municipality code (`Kommu_141`). The script tries all prefixes 01-25 and skips any that have no data.
+
 ### Notes
 
 * Current implementation is provided as is, it is still experimental, use at your own risk.

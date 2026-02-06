@@ -1629,44 +1629,62 @@ def simplify_network_linear(groups):
         # Use dict instead of deepcopy list to preserve order and allow O(1) removal
         remaining_segments = {id(seg): seg for seg in group_segments}
 
+        # Build O(1) lookup dicts for this group
+        by_start = {}  # start_node -> list of segment ids
+        by_end = {}    # end_node -> list of segment ids
+        for seg_id, seg in remaining_segments.items():
+            by_start.setdefault(seg["start_node"], []).append(seg_id)
+            by_end.setdefault(seg["end_node"], []).append(seg_id)
+
         # Repeat building sequences of longer ways until all segments have been used
         while remaining_segments:
             # Get first available segment (deterministic)
             segment_id = next(iter(remaining_segments))
             segment = remaining_segments.pop(segment_id)
+            # Remove from lookup dicts
+            by_start[segment["start_node"]].remove(segment_id)
+            by_end[segment["end_node"]].remove(segment_id)
+
             way = [segment]
-            
+
             first_node = segment["start_node"]
             last_node = segment["end_node"]
 
-            # Build way forward
+            # Build way forward — O(1) lookup
             found = True
             while found:
                 found = False
-                # Iterating over a list of values is better than dict.values() if we pop
-                for seg in list(remaining_segments.values()):
-                    if seg["start_node"] == last_node:
-                        angle = compute_junction_angle(way[-1], seg)
-                        if abs(angle) < angle_margin:
-                            last_node = seg["end_node"]
-                            way.append(seg)
-                            remaining_segments.pop(id(seg))
-                            found = True
-                            break
+                for seg_id in list(by_start.get(last_node, [])):
+                    seg = remaining_segments.get(seg_id)
+                    if seg is None:
+                        continue
+                    angle = compute_junction_angle(way[-1], seg)
+                    if abs(angle) < angle_margin:
+                        last_node = seg["end_node"]
+                        way.append(seg)
+                        remaining_segments.pop(seg_id)
+                        by_start[seg["start_node"]].remove(seg_id)
+                        by_end[seg["end_node"]].remove(seg_id)
+                        found = True
+                        break
 
-            # Build way backward
+            # Build way backward — O(1) lookup
             found = True
             while found:
                 found = False
-                for seg in list(remaining_segments.values()):
-                    if seg["end_node"] == first_node:
-                        angle = compute_junction_angle(seg, way[0])
-                        if abs(angle) < angle_margin:
-                            first_node = seg["start_node"]
-                            way.insert(0, seg)
-                            remaining_segments.pop(id(seg))
-                            found = True
-                            break
+                for seg_id in list(by_end.get(first_node, [])):
+                    seg = remaining_segments.get(seg_id)
+                    if seg is None:
+                        continue
+                    angle = compute_junction_angle(seg, way[0])
+                    if abs(angle) < angle_margin:
+                        first_node = seg["start_node"]
+                        way.insert(0, seg)
+                        remaining_segments.pop(seg_id)
+                        by_start[seg["start_node"]].remove(seg_id)
+                        by_end[seg["end_node"]].remove(seg_id)
+                        found = True
+                        break
 
             # Create new ways, each with identical segment tags
 
@@ -2059,7 +2077,7 @@ def transform_coordinates(
 
 
 def load_file_fiona(
-    filename: str, layer: Optional[str] = None
+    filename: str, layer: Optional[str] = None, where: Optional[str] = None
 ) -> Tuple[Dict[str, Any], str]:
     try:
         import fiona
@@ -2085,7 +2103,8 @@ def load_file_fiona(
         source_crs = str(src.crs) if src.crs else "EPSG:3006"
         message("(CRS: %s) " % source_crs)
 
-        for fiona_feature in src:
+        iterator = src.filter(where=where) if where else src
+        for fiona_feature in iterator:
             geometry = dict(fiona_feature["geometry"])
             properties = dict(fiona_feature["properties"])
 
@@ -2114,17 +2133,41 @@ def load_file_fiona(
 
 
 def load_file(
-    filename: str, source_crs: Optional[str] = None, layer: Optional[str] = None
+    filename: str, source_crs: Optional[str] = None, layer: Optional[str] = None,
+    county: Optional[str] = None, municipality: Optional[str] = None
 ) -> None:
     global segments
 
-    message("Loading file '%s' ... " % filename)
+    # Build OGR SQL where clause for filtering by county or municipality
+    where = None
+    if municipality:
+        where = "Kommu_141 = '%s'" % municipality
+    elif county:
+        where = "Kommu_141 LIKE '%s%%'" % county
+
+    if where:
+        message("Loading file '%s' (filter: %s) ... " % (filename, where))
+    else:
+        message("Loading file '%s' ... " % filename)
 
     file_lower = filename.lower()
 
     if file_lower.endswith(".geojson") or file_lower.endswith(".json"):
         with open(filename) as f:
             segments = json.load(f)
+
+        # Python-side filtering for GeoJSON (uses raw field name before rename)
+        if municipality:
+            segments["features"] = [
+                f for f in segments["features"]
+                if str(f["properties"].get("Kommu_141", "")) == municipality
+            ]
+        elif county:
+            segments["features"] = [
+                f for f in segments["features"]
+                if str(f["properties"].get("Kommu_141", "")).startswith(county)
+            ]
+
         if source_crs is None:
             if _guess_wgs84(segments):
                 source_crs = "EPSG:4326"
@@ -2133,7 +2176,7 @@ def load_file(
                 source_crs = "EPSG:3006"
         message("(CRS: %s) " % source_crs)
     else:
-        segments, detected_crs = load_file_fiona(filename, layer=layer)
+        segments, detected_crs = load_file_fiona(filename, layer=layer, where=where)
         if source_crs is None:
             source_crs = detected_crs
 
@@ -2241,6 +2284,34 @@ def load_file(
     message("\n\t%i highway segments loaded\n" % len(segments["features"]))
 
 
+# Reset global state for processing a new chunk
+
+def reset_globals():
+    global segments, nodes, junctions, ways
+    segments = []
+    nodes = []
+    junctions = {}
+    ways = []
+
+
+# Process one chunk (county or municipality)
+
+def process_one(filename, output_file, output_format, source_crs, layer, county=None, municipality=None):
+    reset_globals()
+    load_file(filename, source_crs=source_crs, layer=layer, county=county, municipality=municipality)
+    if not segments or not segments.get("features"):
+        message("\tNo segments found, skipping.\n")
+        return 0
+    count = len(segments["features"])
+    tag_network()
+    simplify_network(simplify_method)
+    if output_format == "pbf":
+        output_pbf(filename, output_filename=output_file)
+    else:
+        output_network(filename, output_filename=output_file)
+    return count
+
+
 # Main program
 
 if __name__ == "__main__":
@@ -2265,6 +2336,21 @@ if __name__ == "__main__":
     parser.add_argument("-debug", action="store_true", help="Add extra tags for debugging/testing")
     parser.add_argument("--layer", help="Layer name for FileGDB/GeoPackage/Shapefile")
     parser.add_argument("--source-crs", help="Source CRS (e.g. EPSG:3006)")
+    parser.add_argument(
+        "--county",
+        help="Process only one county (e.g. 25 for Norrbotten)",
+    )
+    parser.add_argument(
+        "--municipality",
+        help="Process only one municipality (e.g. 2580 for Umea)",
+    )
+    parser.add_argument(
+        "--split",
+        nargs="?",
+        const="county",
+        choices=["county", "municipality"],
+        help="Process entire file by splitting into chunks. Default: county. Output goes to a folder.",
+    )
 
     args = parser.parse_args()
 
@@ -2306,21 +2392,115 @@ if __name__ == "__main__":
     junctions = {}  # To store all junctions
     ways = []  # To store connected ways for output
 
-    # Process network
+    ext = ".osm.pbf" if output_format == "pbf" else ".osm"
 
-    load_file(filename, source_crs=source_crs, layer=layer)
-    tag_network()
-    simplify_network(simplify_method)  # Options: recursive, route or refname
-
-    if output_format == "pbf":
-        output_pbf(filename, output_filename=output_file)
+    # Determine base name for output
+    base = filename
+    for strip_ext in [".geojson", ".json", ".gpkg", ".shp"]:
+        if base.lower().endswith(strip_ext):
+            base = base[: -len(strip_ext)]
+            break
     else:
-        output_network(filename, output_filename=output_file)
+        if base.lower().endswith(".gdb"):
+            base = base[: -len(".gdb")]
 
-    message(
-        "Time: %i seconds (%i segments per second)\n\n"
-        % (
-            (time.time() - start_time),
-            (len(segments["features"]) / (time.time() - start_time)),
+    if args.split:
+        # --split county or --split municipality
+        output_dir = output_file if output_file else base + "_split"
+        os.makedirs(output_dir, exist_ok=True)
+
+        total_segments = 0
+
+        if args.split == "county":
+            for code in ['%02d' % i for i in range(1, 26)]:
+                chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
+                message("\n=== County %s ===\n" % code)
+                chunk_time = time.time()
+                count = process_one(filename, chunk_file, output_format, source_crs, layer, county=code)
+                total_segments += count
+                if count:
+                    message("County %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
+
+        elif args.split == "municipality":
+            # Discover municipality codes
+            message("Scanning for municipality codes...\n")
+            file_lower = filename.lower()
+            if file_lower.endswith(".geojson") or file_lower.endswith(".json"):
+                with open(filename) as f:
+                    data = json.load(f)
+                codes = sorted(set(
+                    str(f["properties"].get("Kommu_141", ""))
+                    for f in data["features"]
+                    if f["properties"].get("Kommu_141")
+                ))
+                del data
+            else:
+                try:
+                    import fiona
+                except ImportError:
+                    sys.exit("Error: 'fiona' package is required. Install with: pip install fiona")
+                with fiona.open(filename, layer=layer or "TNE_FT_VAGDATA") as src:
+                    codes = sorted(set(
+                        str(f["properties"]["Kommu_141"])
+                        for f in src
+                        if f["properties"].get("Kommu_141")
+                    ))
+            message("Found %i municipality codes\n" % len(codes))
+
+            for code in codes:
+                chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
+                message("\n=== Municipality %s ===\n" % code)
+                chunk_time = time.time()
+                count = process_one(filename, chunk_file, output_format, source_crs, layer, municipality=code)
+                total_segments += count
+                if count:
+                    message("Municipality %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
+
+        elapsed = time.time() - start_time
+        message("\nTotal: %i segments in %i seconds" % (total_segments, elapsed))
+        if total_segments:
+            message(" (%i segments per second)" % (total_segments / elapsed))
+        message("\n")
+
+        # Print merge command
+        if output_format == "pbf":
+            pattern = os.path.join(output_dir, "%s_*%s" % (args.split, ext))
+            message("\nTo merge into a single file:\n")
+            message("  osmium merge %s -o %s%s\n\n" % (pattern, base, ext))
+        else:
+            pattern = os.path.join(output_dir, "%s_*%s" % (args.split, ext))
+            message("\nOutput files in: %s\n\n" % output_dir)
+
+    elif args.county or args.municipality:
+        # Single region
+        count = process_one(
+            filename, output_file, output_format, source_crs, layer,
+            county=args.county, municipality=args.municipality,
         )
-    )
+        elapsed = time.time() - start_time
+        if count:
+            message("Time: %i seconds (%i segments per second)\n\n" % (elapsed, count / elapsed))
+
+    else:
+        # Existing behavior: process entire file at once
+        load_file(filename, source_crs=source_crs, layer=layer)
+
+        if segments and segments.get("features") and len(segments["features"]) > 500000:
+            message(
+                "WARNING: Large dataset (%i segments). Consider using --split county for country-wide data.\n"
+                % len(segments["features"])
+            )
+
+        tag_network()
+        simplify_network(simplify_method)
+
+        if output_format == "pbf":
+            output_pbf(filename, output_filename=output_file)
+        else:
+            output_network(filename, output_filename=output_file)
+
+        elapsed = time.time() - start_time
+        message(
+            "Time: %i seconds (%i segments per second)\n\n"
+            % (elapsed, len(segments["features"]) / elapsed)
+        )
