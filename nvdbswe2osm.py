@@ -2381,6 +2381,12 @@ if __name__ == "__main__":
         default=1,
         help="Number of parallel workers for --split mode (default: 1 = sequential).",
     )
+    parser.add_argument(
+        "--all-county-codes",
+        action="store_true",
+        help="Try all county codes 01-25 instead of the 21 known valid codes. "
+             "Use if county boundaries have been reorganized.",
+    )
 
     args = parser.parse_args()
 
@@ -2455,7 +2461,12 @@ if __name__ == "__main__":
         num_jobs = args.jobs
 
         if args.split == "county":
-            codes = ['%02d' % i for i in range(1, 26)]
+            if args.all_county_codes:
+                codes = ['%02d' % i for i in range(1, 26)]
+            else:
+                # 21 current Swedish counties (codes 02, 11, 15, 16 were merged into other counties)
+                codes = ['01', '03', '04', '05', '06', '07', '08', '09', '10',
+                         '12', '13', '14', '17', '18', '19', '20', '21', '22', '23', '24', '25']
 
             if num_jobs > 1:
                 config = {
@@ -2465,33 +2476,39 @@ if __name__ == "__main__":
                 }
                 message("Processing %i counties with %i workers...\n" % (len(codes), num_jobs))
                 futures = {}
-                with concurrent.futures.ProcessPoolExecutor(max_workers=num_jobs) as executor:
-                    for i, code in enumerate(codes):
-                        chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
-                        start_id = i * 10_000_000 + 1
-                        future = executor.submit(
-                            _process_chunk,
-                            filename, chunk_file, output_format, source_crs, layer,
-                            code, None, start_id, start_id, config)
-                        futures[future] = code
-                    done_count = 0
-                    for future in concurrent.futures.as_completed(futures):
-                        code = futures[future]
-                        try:
-                            chunk_label, count, elapsed_chunk = future.result()
-                        except Exception as e:
-                            message("ERROR: County %s failed: %s\n" % (code, e))
-                            raise
-                        done_count += 1
-                        total_segments += count
-                        if count:
-                            message("[%2d/%d done] County %s: %s segments (%.0fs) | Total: %s segments\n" % (
-                                done_count, len(codes), chunk_label,
-                                "{:,}".format(count), elapsed_chunk,
-                                "{:,}".format(total_segments)))
-                        else:
-                            message("[%2d/%d done] County %s: skipped (no segments)\n" % (
-                                done_count, len(codes), chunk_label))
+                try:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                        for i, code in enumerate(codes):
+                            chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
+                            start_id = i * 10_000_000 + 1
+                            future = executor.submit(
+                                _process_chunk,
+                                filename, chunk_file, output_format, source_crs, layer,
+                                code, None, start_id, start_id, config)
+                            futures[future] = code
+                        done_count = 0
+                        for future in concurrent.futures.as_completed(futures):
+                            code = futures[future]
+                            try:
+                                chunk_label, count, elapsed_chunk = future.result()
+                            except Exception as e:
+                                message("ERROR: County %s failed: %s\n" % (code, e))
+                                raise
+                            done_count += 1
+                            total_segments += count
+                            if count:
+                                message("[%2d/%d done] County %s: %s segments (%.0fs) | Total: %s segments\n" % (
+                                    done_count, len(codes), chunk_label,
+                                    "{:,}".format(count), elapsed_chunk,
+                                    "{:,}".format(total_segments)))
+                            else:
+                                message("[%2d/%d done] County %s: skipped (no segments)\n" % (
+                                    done_count, len(codes), chunk_label))
+                except concurrent.futures.process.BrokenProcessPool:
+                    message("\nERROR: A worker process was killed (likely out of memory).\n"
+                            "Try reducing --jobs (e.g. -j %d) to lower memory usage.\n"
+                            % max(1, num_jobs // 2))
+                    sys.exit(1)
             else:
                 for i, code in enumerate(codes):
                     chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
@@ -2539,33 +2556,39 @@ if __name__ == "__main__":
                 }
                 message("Processing %i municipalities with %i workers...\n" % (len(codes), num_jobs))
                 futures = {}
-                with concurrent.futures.ProcessPoolExecutor(max_workers=num_jobs) as executor:
-                    for i, code in enumerate(codes):
-                        chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
-                        start_id = i * 10_000_000 + 1
-                        future = executor.submit(
-                            _process_chunk,
-                            filename, chunk_file, output_format, source_crs, layer,
-                            None, code, start_id, start_id, config)
-                        futures[future] = code
-                    done_count = 0
-                    for future in concurrent.futures.as_completed(futures):
-                        code = futures[future]
-                        try:
-                            chunk_label, count, elapsed_chunk = future.result()
-                        except Exception as e:
-                            message("ERROR: Municipality %s failed: %s\n" % (code, e))
-                            raise
-                        done_count += 1
-                        total_segments += count
-                        if count:
-                            message("[%3d/%d done] Municipality %s: %s segments (%.0fs) | Total: %s segments\n" % (
-                                done_count, len(codes), chunk_label,
-                                "{:,}".format(count), elapsed_chunk,
-                                "{:,}".format(total_segments)))
-                        else:
-                            message("[%3d/%d done] Municipality %s: skipped (no segments)\n" % (
-                                done_count, len(codes), chunk_label))
+                try:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                        for i, code in enumerate(codes):
+                            chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
+                            start_id = i * 10_000_000 + 1
+                            future = executor.submit(
+                                _process_chunk,
+                                filename, chunk_file, output_format, source_crs, layer,
+                                None, code, start_id, start_id, config)
+                            futures[future] = code
+                        done_count = 0
+                        for future in concurrent.futures.as_completed(futures):
+                            code = futures[future]
+                            try:
+                                chunk_label, count, elapsed_chunk = future.result()
+                            except Exception as e:
+                                message("ERROR: Municipality %s failed: %s\n" % (code, e))
+                                raise
+                            done_count += 1
+                            total_segments += count
+                            if count:
+                                message("[%3d/%d done] Municipality %s: %s segments (%.0fs) | Total: %s segments\n" % (
+                                    done_count, len(codes), chunk_label,
+                                    "{:,}".format(count), elapsed_chunk,
+                                    "{:,}".format(total_segments)))
+                            else:
+                                message("[%3d/%d done] Municipality %s: skipped (no segments)\n" % (
+                                    done_count, len(codes), chunk_label))
+                except concurrent.futures.process.BrokenProcessPool:
+                    message("\nERROR: A worker process was killed (likely out of memory).\n"
+                            "Try reducing --jobs (e.g. -j %d) to lower memory usage.\n"
+                            % max(1, num_jobs // 2))
+                    sys.exit(1)
             else:
                 for i, code in enumerate(codes):
                     chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
