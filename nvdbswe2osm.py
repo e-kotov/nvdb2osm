@@ -18,6 +18,7 @@ import argparse
 import os
 import glob
 import concurrent.futures
+import resource
 from xml.etree import ElementTree as ET
 from typing import Any, Optional, Union, Dict, List, Tuple, Callable
 
@@ -2311,6 +2312,21 @@ def process_one(filename, output_file, output_format, source_crs, layer,
     return count, next_node_id, next_way_id
 
 
+# Memory reporting helpers
+
+def _get_peak_mb():
+    """Return current peak RSS in MB (works on Linux and macOS)."""
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # macOS reports bytes, Linux reports kilobytes
+    return ru / 1024 if sys.platform != "darwin" else ru / 1024 / 1024
+
+def _fmt_mem(mb):
+    """Format memory in MB or GB."""
+    if mb >= 1024:
+        return "%.1f GB" % (mb / 1024)
+    return "%.0f MB" % mb
+
+
 # Worker function for parallel --split processing (runs in spawned subprocess)
 
 def _process_chunk(filename, chunk_file, output_format, source_crs, layer,
@@ -2328,7 +2344,8 @@ def _process_chunk(filename, chunk_file, output_format, source_crs, layer,
         county=county, municipality=municipality,
         start_node_id=start_node_id, start_way_id=start_way_id)
     elapsed = time.time() - t0
-    return (chunk_label, count, elapsed)
+    peak_mb = _get_peak_mb()
+    return (chunk_label, count, elapsed, peak_mb)
 
 
 # Main program
@@ -2490,16 +2507,16 @@ if __name__ == "__main__":
                         for future in concurrent.futures.as_completed(futures):
                             code = futures[future]
                             try:
-                                chunk_label, count, elapsed_chunk = future.result()
+                                chunk_label, count, elapsed_chunk, peak_mb = future.result()
                             except Exception as e:
                                 message("ERROR: County %s failed: %s\n" % (code, e))
                                 raise
                             done_count += 1
                             total_segments += count
                             if count:
-                                message("[%2d/%d done] County %s: %s segments (%.0fs) | Total: %s segments\n" % (
+                                message("[%2d/%d done] County %s: %s segments (%.0fs, %s peak) | Total: %s segments\n" % (
                                     done_count, len(codes), chunk_label,
-                                    "{:,}".format(count), elapsed_chunk,
+                                    "{:,}".format(count), elapsed_chunk, _fmt_mem(peak_mb),
                                     "{:,}".format(total_segments)))
                             else:
                                 message("[%2d/%d done] County %s: skipped (no segments)\n" % (
@@ -2520,7 +2537,8 @@ if __name__ == "__main__":
                         county=code, start_node_id=start_id, start_way_id=start_id)
                     total_segments += count
                     if count:
-                        message("County %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
+                        peak_mb = _get_peak_mb()
+                        message("County %s: %i segments in %i seconds (peak %s)\n" % (code, count, time.time() - chunk_time, _fmt_mem(peak_mb)))
 
         elif args.split == "municipality":
             # Discover municipality codes
@@ -2570,16 +2588,16 @@ if __name__ == "__main__":
                         for future in concurrent.futures.as_completed(futures):
                             code = futures[future]
                             try:
-                                chunk_label, count, elapsed_chunk = future.result()
+                                chunk_label, count, elapsed_chunk, peak_mb = future.result()
                             except Exception as e:
                                 message("ERROR: Municipality %s failed: %s\n" % (code, e))
                                 raise
                             done_count += 1
                             total_segments += count
                             if count:
-                                message("[%3d/%d done] Municipality %s: %s segments (%.0fs) | Total: %s segments\n" % (
+                                message("[%3d/%d done] Municipality %s: %s segments (%.0fs, %s peak) | Total: %s segments\n" % (
                                     done_count, len(codes), chunk_label,
-                                    "{:,}".format(count), elapsed_chunk,
+                                    "{:,}".format(count), elapsed_chunk, _fmt_mem(peak_mb),
                                     "{:,}".format(total_segments)))
                             else:
                                 message("[%3d/%d done] Municipality %s: skipped (no segments)\n" % (
@@ -2600,7 +2618,8 @@ if __name__ == "__main__":
                         municipality=code, start_node_id=start_id, start_way_id=start_id)
                     total_segments += count
                     if count:
-                        message("Municipality %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
+                        peak_mb = _get_peak_mb()
+                        message("Municipality %s: %i segments in %i seconds (peak %s)\n" % (code, count, time.time() - chunk_time, _fmt_mem(peak_mb)))
 
         elapsed = time.time() - start_time
         message("\nTotal: %i segments in %i seconds" % (total_segments, elapsed))
@@ -2614,12 +2633,20 @@ if __name__ == "__main__":
             chunk_files = sorted(glob.glob(chunk_pattern))
             if len(chunk_files) > 1:
                 message("\nMerging %i files into '%s'... " % (len(chunk_files), merged_file))
+                pre_merge_mb = _get_peak_mb()
+                merge_time = time.time()
                 merger = osmium.MergeInputReader()
                 for cf in chunk_files:
                     merger.add_file(cf)
                 with osmium.SimpleWriter(merged_file) as writer:
                     merger.apply(writer, simplify=False)
-                message("done.\n")
+                post_merge_mb = _get_peak_mb()
+                merge_elapsed = time.time() - merge_time
+                merge_delta = post_merge_mb - pre_merge_mb
+                if merge_delta > 0:
+                    message("done in %is (merge used %s, total peak %s)\n" % (merge_elapsed, _fmt_mem(merge_delta), _fmt_mem(post_merge_mb)))
+                else:
+                    message("done in %is (peak %s)\n" % (merge_elapsed, _fmt_mem(post_merge_mb)))
             elif len(chunk_files) == 1:
                 message("\nSingle output file: %s\n" % chunk_files[0])
 
@@ -2656,3 +2683,5 @@ if __name__ == "__main__":
             "Time: %i seconds (%i segments per second)\n\n"
             % (elapsed, len(segments["features"]) / elapsed)
         )
+
+    message("Peak memory: %s\n" % _fmt_mem(_get_peak_mb()))
