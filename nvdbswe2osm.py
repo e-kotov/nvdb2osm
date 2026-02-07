@@ -16,6 +16,7 @@ import math
 import time
 import argparse
 import os
+import glob
 from xml.etree import ElementTree as ET
 from typing import Any, Optional, Union, Dict, List, Tuple, Callable
 
@@ -1811,11 +1812,12 @@ def tag_property(osm_element: ET.Element, tag_key: str, tag_value: str) -> None:
 # Output road network or objects to OSM file
 
 
-def output_network(filename: str, output_filename: Optional[str] = None) -> None:
+def output_network(filename: str, output_filename: Optional[str] = None,
+                   start_node_id: int = 1, start_way_id: int = 1) -> Tuple[int, int]:
     message("Saving file... ")
 
-    node_id = 1
-    way_id = 1
+    node_id = start_node_id
+    way_id = start_way_id
     count = 0
 
     osm_root = ET.Element(
@@ -1940,12 +1942,14 @@ def output_network(filename: str, output_filename: Optional[str] = None) -> None
     osm_tree.write(filename, encoding="utf-8", method="xml", xml_declaration=True)
 
     message("\n\tSaved %i elements in file '%s'\n" % (count, filename))
+    return (node_id, way_id)
 
 
 # Output road network to OSM PBF file using pyosmium
 
 
-def output_pbf(filename: str, output_filename: Optional[str] = None) -> None:
+def output_pbf(filename: str, output_filename: Optional[str] = None,
+               start_node_id: int = 1, start_way_id: int = 1) -> Tuple[int, int]:
     message("Saving PBF file... ")
 
     if output_filename:
@@ -1974,8 +1978,8 @@ def output_pbf(filename: str, output_filename: Optional[str] = None) -> None:
         os.remove(filename)
 
     writer = osmium.SimpleWriter(filename)
-    node_id = 1
-    way_id = 1
+    node_id = start_node_id
+    way_id = start_way_id
     count = 0
 
     # Pass 1: Write all junction nodes
@@ -2024,6 +2028,7 @@ def output_pbf(filename: str, output_filename: Optional[str] = None) -> None:
 
     writer.close()
     message("\n\tSaved %i elements in file '%s'\n" % (count, filename))
+    return (node_id, way_id)
 
 
 # Check if coordinates in a GeoJSON FeatureCollection look like WGS84.
@@ -2280,20 +2285,26 @@ def reset_globals():
 
 # Process one chunk (county or municipality)
 
-def process_one(filename, output_file, output_format, source_crs, layer, county=None, municipality=None):
+def process_one(filename, output_file, output_format, source_crs, layer,
+                county=None, municipality=None,
+                start_node_id=1, start_way_id=1):
     reset_globals()
     load_file(filename, source_crs=source_crs, layer=layer, county=county, municipality=municipality)
     if not segments or not segments.get("features"):
         message("\tNo segments found, skipping.\n")
-        return 0
+        return 0, start_node_id, start_way_id
     count = len(segments["features"])
     tag_network()
     simplify_network(simplify_method)
     if output_format == "pbf":
-        output_pbf(filename, output_filename=output_file)
+        next_node_id, next_way_id = output_pbf(
+            filename, output_filename=output_file,
+            start_node_id=start_node_id, start_way_id=start_way_id)
     else:
-        output_network(filename, output_filename=output_file)
-    return count
+        next_node_id, next_way_id = output_network(
+            filename, output_filename=output_file,
+            start_node_id=start_node_id, start_way_id=start_way_id)
+    return count, next_node_id, next_way_id
 
 
 # Main program
@@ -2334,6 +2345,11 @@ if __name__ == "__main__":
         const="county",
         choices=["county", "municipality"],
         help="Process entire file by splitting into chunks. Default: county. Output goes to a folder.",
+    )
+    parser.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="With --split: skip auto-merge, keep only individual chunk files.",
     )
 
     args = parser.parse_args()
@@ -2394,13 +2410,17 @@ if __name__ == "__main__":
         os.makedirs(output_dir, exist_ok=True)
 
         total_segments = 0
+        next_node_id = 1
+        next_way_id = 1
 
         if args.split == "county":
             for code in ['%02d' % i for i in range(1, 26)]:
                 chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
                 message("\n=== County %s ===\n" % code)
                 chunk_time = time.time()
-                count = process_one(filename, chunk_file, output_format, source_crs, layer, county=code)
+                count, next_node_id, next_way_id = process_one(
+                    filename, chunk_file, output_format, source_crs, layer,
+                    county=code, start_node_id=next_node_id, start_way_id=next_way_id)
                 total_segments += count
                 if count:
                     message("County %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
@@ -2435,7 +2455,9 @@ if __name__ == "__main__":
                 chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
                 message("\n=== Municipality %s ===\n" % code)
                 chunk_time = time.time()
-                count = process_one(filename, chunk_file, output_format, source_crs, layer, municipality=code)
+                count, next_node_id, next_way_id = process_one(
+                    filename, chunk_file, output_format, source_crs, layer,
+                    municipality=code, start_node_id=next_node_id, start_way_id=next_way_id)
                 total_segments += count
                 if count:
                     message("Municipality %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
@@ -2446,18 +2468,25 @@ if __name__ == "__main__":
             message(" (%i segments per second)" % (total_segments / elapsed))
         message("\n")
 
-        # Print merge command
-        if output_format == "pbf":
-            pattern = os.path.join(output_dir, "%s_*%s" % (args.split, ext))
-            message("\nTo merge into a single file:\n")
-            message("  osmium merge %s -o %s%s\n\n" % (pattern, base, ext))
-        else:
-            pattern = os.path.join(output_dir, "%s_*%s" % (args.split, ext))
-            message("\nOutput files in: %s\n\n" % output_dir)
+        # Auto-merge chunk files
+        if not args.no_merge:
+            chunk_pattern = os.path.join(output_dir, "%s_*%s" % (args.split, ext))
+            chunk_files = sorted(glob.glob(chunk_pattern))
+            if len(chunk_files) > 1:
+                merged_file = base + ext
+                message("\nMerging %i files into '%s'... " % (len(chunk_files), merged_file))
+                merger = osmium.MergeInputReader()
+                for cf in chunk_files:
+                    merger.add_file(cf)
+                with osmium.SimpleWriter(merged_file) as writer:
+                    merger.apply(writer, simplify=False)
+                message("done.\n")
+            elif len(chunk_files) == 1:
+                message("\nSingle output file: %s\n" % chunk_files[0])
 
     elif args.county or args.municipality:
         # Single region
-        count = process_one(
+        count, _, _ = process_one(
             filename, output_file, output_format, source_crs, layer,
             county=args.county, municipality=args.municipality,
         )

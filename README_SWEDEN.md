@@ -43,11 +43,19 @@ The full Swedish NVDB dataset (5M+ segments, ~1.7 GB FileGDB) requires too much 
 python3 nvdbswe2osm.py file.gdb --split county --format pbf
 ```
 
-This creates a folder with one output file per county. To merge into a single file:
+This splits the data into per-county files, then merges them into a single output (e.g. `file.osm.pbf`). The individual chunk files are kept in a `_split` folder. Use `-o` to set the merged output filename:
 
 ```
-osmium merge sw_split/county_*.osm.pbf -o sweden.osm.pbf
+python3 nvdbswe2osm.py file.gdb --split county --format pbf -o sweden.osm.pbf
 ```
+
+Use `--no-merge` to skip the merge and keep only the individual files. With `--no-merge`, `-o` sets the output folder instead:
+
+```
+python3 nvdbswe2osm.py file.gdb --split county --format pbf --no-merge -o chunks
+```
+
+Both `--format pbf` and `--format osm` (XML) work with `--split`. Output files are sorted and ready for tools like `osmium`.
 
 For finer splits (e.g. if a county is still too large):
 
