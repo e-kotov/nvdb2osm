@@ -17,6 +17,7 @@ import time
 import argparse
 import os
 import glob
+import concurrent.futures
 from xml.etree import ElementTree as ET
 from typing import Any, Optional, Union, Dict, List, Tuple, Callable
 
@@ -30,6 +31,7 @@ except ImportError:
 version = "0.5.0"
 
 debug = False  # Add extra tags for debugging/testing
+quiet = False  # Suppress output in worker processes
 
 angle_margin = (
     45.0  # Maximum turn at intersection before highway is split into new way (degrees).
@@ -290,6 +292,8 @@ nvdb_attributes = {
 
 
 def message(line: str) -> None:
+    if quiet:
+        return
     sys.stdout.write(line)
     sys.stdout.flush()
 
@@ -2307,6 +2311,26 @@ def process_one(filename, output_file, output_format, source_crs, layer,
     return count, next_node_id, next_way_id
 
 
+# Worker function for parallel --split processing (runs in spawned subprocess)
+
+def _process_chunk(filename, chunk_file, output_format, source_crs, layer,
+                   county, municipality, start_node_id, start_way_id, config):
+    global simplify_method, segment_output, debug, quiet
+    simplify_method = config["simplify_method"]
+    segment_output = config["segment_output"]
+    debug = config["debug"]
+    quiet = True
+
+    chunk_label = county or municipality
+    t0 = time.time()
+    count, _, _ = process_one(
+        filename, chunk_file, output_format, source_crs, layer,
+        county=county, municipality=municipality,
+        start_node_id=start_node_id, start_way_id=start_way_id)
+    elapsed = time.time() - t0
+    return (chunk_label, count, elapsed)
+
+
 # Main program
 
 if __name__ == "__main__":
@@ -2350,6 +2374,12 @@ if __name__ == "__main__":
         "--no-merge",
         action="store_true",
         help="With --split: skip auto-merge, keep only individual chunk files.",
+    )
+    parser.add_argument(
+        "--jobs", "-j",
+        type=int,
+        default=1,
+        help="Number of parallel workers for --split mode (default: 1 = sequential).",
     )
 
     args = parser.parse_args()
@@ -2422,20 +2452,58 @@ if __name__ == "__main__":
         os.makedirs(output_dir, exist_ok=True)
 
         total_segments = 0
-        next_node_id = 1
-        next_way_id = 1
+        num_jobs = args.jobs
 
         if args.split == "county":
-            for code in ['%02d' % i for i in range(1, 26)]:
-                chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
-                message("\n=== County %s ===\n" % code)
-                chunk_time = time.time()
-                count, next_node_id, next_way_id = process_one(
-                    filename, chunk_file, output_format, source_crs, layer,
-                    county=code, start_node_id=next_node_id, start_way_id=next_way_id)
-                total_segments += count
-                if count:
-                    message("County %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
+            codes = ['%02d' % i for i in range(1, 26)]
+
+            if num_jobs > 1:
+                config = {
+                    "simplify_method": simplify_method,
+                    "segment_output": segment_output,
+                    "debug": debug,
+                }
+                message("Processing %i counties with %i workers...\n" % (len(codes), num_jobs))
+                futures = {}
+                with concurrent.futures.ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                    for i, code in enumerate(codes):
+                        chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
+                        start_id = i * 10_000_000 + 1
+                        future = executor.submit(
+                            _process_chunk,
+                            filename, chunk_file, output_format, source_crs, layer,
+                            code, None, start_id, start_id, config)
+                        futures[future] = code
+                    done_count = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        code = futures[future]
+                        try:
+                            chunk_label, count, elapsed_chunk = future.result()
+                        except Exception as e:
+                            message("ERROR: County %s failed: %s\n" % (code, e))
+                            raise
+                        done_count += 1
+                        total_segments += count
+                        if count:
+                            message("[%2d/%d done] County %s: %s segments (%.0fs) | Total: %s segments\n" % (
+                                done_count, len(codes), chunk_label,
+                                "{:,}".format(count), elapsed_chunk,
+                                "{:,}".format(total_segments)))
+                        else:
+                            message("[%2d/%d done] County %s: skipped (no segments)\n" % (
+                                done_count, len(codes), chunk_label))
+            else:
+                for i, code in enumerate(codes):
+                    chunk_file = os.path.join(output_dir, "county_%s%s" % (code, ext))
+                    start_id = i * 10_000_000 + 1
+                    message("\n=== County %s ===\n" % code)
+                    chunk_time = time.time()
+                    count, _, _ = process_one(
+                        filename, chunk_file, output_format, source_crs, layer,
+                        county=code, start_node_id=start_id, start_way_id=start_id)
+                    total_segments += count
+                    if count:
+                        message("County %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
 
         elif args.split == "municipality":
             # Discover municipality codes
@@ -2463,16 +2531,53 @@ if __name__ == "__main__":
                     ))
             message("Found %i municipality codes\n" % len(codes))
 
-            for code in codes:
-                chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
-                message("\n=== Municipality %s ===\n" % code)
-                chunk_time = time.time()
-                count, next_node_id, next_way_id = process_one(
-                    filename, chunk_file, output_format, source_crs, layer,
-                    municipality=code, start_node_id=next_node_id, start_way_id=next_way_id)
-                total_segments += count
-                if count:
-                    message("Municipality %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
+            if num_jobs > 1:
+                config = {
+                    "simplify_method": simplify_method,
+                    "segment_output": segment_output,
+                    "debug": debug,
+                }
+                message("Processing %i municipalities with %i workers...\n" % (len(codes), num_jobs))
+                futures = {}
+                with concurrent.futures.ProcessPoolExecutor(max_workers=num_jobs) as executor:
+                    for i, code in enumerate(codes):
+                        chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
+                        start_id = i * 10_000_000 + 1
+                        future = executor.submit(
+                            _process_chunk,
+                            filename, chunk_file, output_format, source_crs, layer,
+                            None, code, start_id, start_id, config)
+                        futures[future] = code
+                    done_count = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        code = futures[future]
+                        try:
+                            chunk_label, count, elapsed_chunk = future.result()
+                        except Exception as e:
+                            message("ERROR: Municipality %s failed: %s\n" % (code, e))
+                            raise
+                        done_count += 1
+                        total_segments += count
+                        if count:
+                            message("[%3d/%d done] Municipality %s: %s segments (%.0fs) | Total: %s segments\n" % (
+                                done_count, len(codes), chunk_label,
+                                "{:,}".format(count), elapsed_chunk,
+                                "{:,}".format(total_segments)))
+                        else:
+                            message("[%3d/%d done] Municipality %s: skipped (no segments)\n" % (
+                                done_count, len(codes), chunk_label))
+            else:
+                for i, code in enumerate(codes):
+                    chunk_file = os.path.join(output_dir, "municipality_%s%s" % (code, ext))
+                    start_id = i * 10_000_000 + 1
+                    message("\n=== Municipality %s ===\n" % code)
+                    chunk_time = time.time()
+                    count, _, _ = process_one(
+                        filename, chunk_file, output_format, source_crs, layer,
+                        municipality=code, start_node_id=start_id, start_way_id=start_id)
+                    total_segments += count
+                    if count:
+                        message("Municipality %s: %i segments in %i seconds\n" % (code, count, time.time() - chunk_time))
 
         elapsed = time.time() - start_time
         message("\nTotal: %i segments in %i seconds" % (total_segments, elapsed))
