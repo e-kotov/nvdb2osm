@@ -2052,7 +2052,7 @@ def _guess_wgs84(segments: Dict[str, Any]) -> bool:
 
 
 # Transform coordinates from source CRS to WGS84 (EPSG:4326).
-# Returns list of [lon, lat, elevation] lists.
+# Returns list of [lon, lat] lists.
 
 
 def transform_coordinates(
@@ -2061,8 +2061,7 @@ def transform_coordinates(
     result = []
     for coord in coordinates:
         lon, lat = transformer.transform(coord[0], coord[1])
-        elevation = float(coord[2]) if len(coord) > 2 else 0.0
-        result.append([lon, lat, elevation])
+        result.append([lon, lat])
     return result
 
 
@@ -2102,10 +2101,10 @@ def load_file_fiona(
             geometry = dict(fiona_feature["geometry"])
             properties = dict(fiona_feature["properties"])
 
-            # Convert coordinate tuples to lists
+            # Convert coordinate tuples to [lon, lat] lists (drop elevation)
             if geometry["type"] == "MultiLineString":
                 geometry["coordinates"] = [
-                    [[float(c) for c in coord] for coord in linestring]
+                    [[float(coord[0]), float(coord[1])] for coord in linestring]
                     for linestring in geometry["coordinates"]
                 ]
             else:
@@ -2208,21 +2207,22 @@ def load_file(
         for key in list(segment["properties"]):
             if segment["properties"][key] is None:
                 del segment["properties"][key]
+            elif key in nvdb_attributes:
+                renamed = nvdb_attributes[key]
+                if renamed:
+                    if segment_output or renamed in _USED_PROPERTIES:
+                        segment["properties"][renamed] = segment["properties"].pop(key)
+                    else:
+                        del segment["properties"][key]
             else:
-                if key in nvdb_attributes:
-                    if nvdb_attributes[key]:
-                        segment["properties"][nvdb_attributes[key]] = segment[
-                            "properties"
-                        ].pop(key)
-                else:
-                    message("*** Attribute %s not recognised\n" % key)
+                message("*** Attribute %s not recognised\n" % key)
 
         # Round coordinates and get start/end nodes
 
         for coordinate in segment["geometry"]["coordinates"][0]:
             coordinate[0] = round(coordinate[0], coordinate_decimals)
             coordinate[1] = round(coordinate[1], coordinate_decimals)
-            coordinate[2] = round(coordinate[2], coordinate_decimals)
+            del coordinate[2:]  # Drop elevation if present
 
         segment["start_node"] = (
             segment["geometry"]["coordinates"][0][0][0],
@@ -2290,6 +2290,72 @@ def reset_globals():
 
 # Process one chunk (county or municipality)
 
+# All property names (renamed) referenced by tagging and simplification code.
+# Properties not in this set are skipped during loading to save memory.
+_USED_PROPERTIES = {
+    "ATK-Mätplats(B)", "ATK-Mätplats(F)",
+    "Antal körfält/Körfältsantal",
+    "Begränsad bruttovikt/Högsta tillåtna bruttovikt(B)",
+    "Begränsad bruttovikt/Högsta tillåtna bruttovikt(F)",
+    "Begränsad fordonsbredd/Högsta tillåtna fordonsbredd",
+    "Begränsad fordonslängd/Högsta tillåtna fordonslängd",
+    "Begränsat axel-boggitryck/Högsta tillåtna tryck",
+    "Bro och tunnel/Identitet", "Bro och tunnel/Konstruktion", "Bro och tunnel/Namn",
+    "Brunn-slamsugning", "Bärighet/Bärighetsklass",
+    "C-Cykelled/Namn", "C-Rekommenderad bilväg for cykel",
+    "Cirkulationsplats(B)", "Cirkulationsplats(F)",
+    "Driftbidrag statligt/Vägnr", "Driftvändplats",
+    "Farthinder/Typ",
+    "Framkomlighet för vissa fordonskombinationer/Framkomlighetsklass",
+    "Funktionell vägklass/Klass", "Funktionellt prioriterat vägnät/FPV-klass",
+    "Färjeled", "Färjeled/Färjeledsnamn",
+    "Förbjuden färdriktning(B)", "Förbjuden färdriktning(F)",
+    "Förbud mot trafik(B)", "Förbud mot trafik(F)",
+    "GCM-belyst", "GCM-passage", "GCM-passage/Passagetyp",
+    "GCM-separation/Separation(H)", "GCM-separation/Separation(V)",
+    "GCM-vägtyp/GCM-typ", "Gatunamn/Namn",
+    "Gågata(H)", "Gågata(V)", "Gångfartsområde(H)", "Gångfartsområde(V)",
+    "Hastighetsgräns/Högsta tillåtna hastighet(B)",
+    "Hastighetsgräns/Högsta tillåtna hastighet(F)",
+    "Hållplats",
+    "Höjdhinder upp till 4,5 m/Fri höjd",
+    "Inskränkningar för transport av farligt gods/Beskrivning(B)",
+    "Inskränkningar för transport av farligt gods/Beskrivning(F)",
+    "Järnvägskorsning/Vägskydd", "Katastroföverfart",
+    "Kollektivkörfält/Körfält-Körbana(B)", "Kollektivkörfält/Körfält-Körbana(F)",
+    "Kommunnr",
+    "Leveranskvalitet DoU 2017/Leveranskvalitetsklass DoU 2017",
+    "Miljözon", "Motortrafikled", "Motorväg",
+    "Omkörningsförbud(B)", "Omkörningsförbud(F)",
+    "P-ficka(H)", "P-ficka(M)", "P-ficka(V)", "Provisorisk väg",
+    "REVERSE", "ROUTE_ID",
+    "Rastficka(H)", "Rastficka(V)", "Rastplats",
+    "Rastplats/Antal markerade parkeringsplatser för lastbil+släp",
+    "Rastplats/Antal markerade parkeringsplatser för personbil",
+    "Rastplats/Rastplatsnamn",
+    "Rekommenderad väg för farligt gods/Rekommendation",
+    "Shape_Length", "Slitlager/Slitlagertyp",
+    "Stigningsfält(B)", "Stigningsfält(F)",
+    "Tillgänglighet/Tillgänglighetsklass", "Tättbebyggt område",
+    "Viltpassage i plan", "Viltuthopp(H)", "Viltuthopp(V)",
+    "Vägbredd/Bredd", "Väghinder/Hindertyp", "Väghinder/Passerbar bredd",
+    "Väghållare/Väghållartyp", "Vägkategori/Kategori", "Vägnummer/Huvudnummer",
+    "Vägtrafiknät/Nättyp", "Övrigt vägnamn/Namn",
+}
+
+# Properties needed by simplify_network() after tag_network() is done
+_KEEP_PROPERTIES = {"Shape_Length", "ROUTE_ID", "Driftbidrag statligt/Vägnr"}
+
+
+def _strip_properties(keep_keys):
+    """Strip segment properties to only the given keys, to free memory."""
+    import gc
+    for feature in segments["features"]:
+        props = feature["properties"]
+        feature["properties"] = {k: props[k] for k in keep_keys if k in props}
+    gc.collect()
+
+
 def process_one(filename, output_file, output_format, source_crs, layer,
                 county=None, municipality=None,
                 start_node_id=1, start_way_id=1):
@@ -2300,7 +2366,11 @@ def process_one(filename, output_file, output_format, source_crs, layer,
         return 0, start_node_id, start_way_id
     count = len(segments["features"])
     tag_network()
+    if not segment_output:
+        _strip_properties(_KEEP_PROPERTIES)
     simplify_network(simplify_method)
+    if not segment_output:
+        _strip_properties(set())
     if output_format == "pbf":
         next_node_id, next_way_id = output_pbf(
             filename, output_filename=output_file,
