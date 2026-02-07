@@ -2406,7 +2406,19 @@ if __name__ == "__main__":
 
     if args.split:
         # --split county or --split municipality
-        output_dir = output_file if output_file else base + "_split"
+        if args.no_merge:
+            # -o is the folder
+            output_dir = output_file if output_file else base + "_split"
+            merged_file = None
+        else:
+            # -o is the merged output file
+            merged_file = output_file if output_file else base + ext
+            merge_base = merged_file
+            for strip_ext in [".osm.pbf", ".osm"]:
+                if merge_base.lower().endswith(strip_ext):
+                    merge_base = merge_base[:-len(strip_ext)]
+                    break
+            output_dir = merge_base + "_split"
         os.makedirs(output_dir, exist_ok=True)
 
         total_segments = 0
@@ -2469,11 +2481,10 @@ if __name__ == "__main__":
         message("\n")
 
         # Auto-merge chunk files
-        if not args.no_merge:
+        if merged_file:
             chunk_pattern = os.path.join(output_dir, "%s_*%s" % (args.split, ext))
             chunk_files = sorted(glob.glob(chunk_pattern))
             if len(chunk_files) > 1:
-                merged_file = base + ext
                 message("\nMerging %i files into '%s'... " % (len(chunk_files), merged_file))
                 merger = osmium.MergeInputReader()
                 for cf in chunk_files:
